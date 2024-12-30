@@ -1,0 +1,124 @@
+name: 🤗空间自动构建
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 20 * * *'  # 每天 20:00 UTC 触发
+
+env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  USERNAME: ${{ secrets.USERNAME }}
+  SPACE_LIST: ${{ secrets.SPACE_LIST }}
+  SPACE_TIMEOUT_SECONDS: 600
+  GLOBAL_TIMEOUT_SECONDS: 1800
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - run: pip install requests pytz
+
+      - id: rebuild
+        run: |
+          python <<EOF
+          import requests, time, os, datetime, logging
+          import pytz
+
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+          hf_token = os.environ["HF_TOKEN"]
+          username = os.environ["USERNAME"]
+          space_list_str = os.environ.get("SPACE_LIST", "")
+          space_list = [space.strip() for space in space_list_str.split(",") if space.strip()]
+          space_timeout_seconds = int(os.environ.get("SPACE_TIMEOUT_SECONDS", 600))
+          global_timeout_seconds = int(os.environ.get("GLOBAL_TIMEOUT_SECONDS", 1800))
+
+          def rebuild_space(space_name, timeout_seconds):
+              full_space_name = f"{username}/{space_name}"
+              logging.info(f"开始重新构建空间: {full_space_name}")
+              rebuild_url = f"https://huggingface.co/api/spaces/{full_space_name}/restart?factory=true"
+              status_url = f"https://huggingface.co/api/spaces/{full_space_name}/runtime"
+
+              headers = {"Authorization": f"Bearer {hf_token}", "Content-Type": "application/json"}
+
+              try:
+                  response = requests.post(rebuild_url, headers=headers)
+                  response.raise_for_status()
+                  logging.info(f"✅空间{space_name}重新构建请求发送成功")
+              except requests.exceptions.RequestException as e:
+                  logging.error(f"❌空间{space_name}重新构建请求失败: {e}")
+                  return False
+
+              start_time = time.time()
+              attempt = 0
+              max_attempts = 10
+              while time.time() - start_time < timeout_seconds and attempt < max_attempts:
+                  time.sleep(30)
+                  try:
+                      status_response = requests.get(status_url, headers=headers)
+                      status_response.raise_for_status()
+                      status_data = status_response.json()
+                      stage = status_data.get("stage", "")
+                      logging.info(f"空间{space_name}当前状态: {stage}")
+                      if stage == "RUNNING":
+                          logging.info(f"✅空间{space_name}已成功重新构建!")
+                          return True
+                      elif "ERROR" in stage:
+                          logging.error(f"❌空间{space_name}构建失败: {stage}")
+                          return False
+                  except requests.exceptions.RequestException as e:
+                      logging.error(f"❌空间{space_name}状态请求失败: {e}")
+                      return False
+                  except Exception as e:
+                      logging.exception(f"❌空间{space_name}发生未知错误: {e}")
+                      return False
+                  attempt += 1
+
+              logging.warning(f"⚠️空间{space_name}构建状态未知 (超时或达到最大尝试次数)")
+              return None
+
+          start_time = time.time()
+          results = []
+          for space in space_list:
+              if time.time() - start_time > global_timeout_seconds:
+                  logging.warning(f"⚠️全局超时，剩余空间未处理")
+                  break
+              result = rebuild_space(space, space_timeout_seconds)
+              results.append({"space": space, "result": result})
+
+          summary_plain = f"总计空间数: {len(space_list)}\n"
+          summary_plain += f"成功数量: {sum(1 for r in results if r['result'] is True)}\n"
+          summary_plain += f"失败数量: {sum(1 for r in results if r['result'] is False)}\n"
+          summary_plain += f"未知状态数量: {sum(1 for r in results if r['result'] is None)}\n"
+          summary_plain += f"{'-'*50}\n具体结果:\n"
+          for r in results:
+              status = "✅" if r['result'] is True else ("❌" if r['result'] is False else "❓")
+              summary_plain += f"{status} {r['space']}\n"
+
+          # 输出结果到 GitHub Actions
+          print("构建结果摘要：")
+          print(summary_plain)
+
+          # 设置退出码
+          exit_code = 1 if any(r['result'] is False or r['result'] is None for r in results) else 0
+
+          # 将 exit_code 传递给下一步
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              print(f"exit_code={exit_code}", file=f)
+
+          if exit_code != 0:
+              exit(1)
+          else:
+              exit(0)
+          EOF
+
+      - if: always()
+        run: exit ${{ steps.rebuild.outputs.exit_code }}
+
+      - if: always()
+        run: echo "🏁构建流程已完成"
