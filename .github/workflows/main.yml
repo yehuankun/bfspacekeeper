@@ -9,7 +9,7 @@ env:
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
   USERNAME: ${{ secrets.USERNAME }}
   SPACE_LIST: ${{ secrets.SPACE_LIST }}
-  GLOBAL_TIMEOUT_SECONDS: 1800
+  GLOBAL_TIMEOUT_SECONDS: 3800
 
 jobs:
   check_and_rebuild:
